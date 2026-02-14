@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# Full Network Privacy Stack (Safe VPS Edition)
-# Tor client mode + Unbound DNS-over-TLS + firewall hygiene
-# Will not intentionally break SSH or apt
-# Continues execution even if some parts fail
-
 set +e
 
 echo "=== Updating System ==="
@@ -12,21 +7,17 @@ apt update -y
 apt upgrade -y
 
 echo "=== Installing Packages ==="
-apt install -y \
-tor torsocks \
-unbound \
-ufw \
-iptables-persistent \
-curl wget dnsutils \
-tcpdump nethogs iftop
+apt install -y tor torsocks unbound ufw curl wget dnsutils iptables-persistent
 
 ########################################
-# 1️⃣ Configure Unbound (DNS Privacy)
+# 1️⃣ Configure Unbound Safely
 ########################################
 
-echo "=== Configuring Unbound DNS ==="
+echo "=== Configuring Unbound ==="
 
 mkdir -p /etc/unbound/unbound.conf.d
+
+unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null
 
 cat <<EOF > /etc/unbound/unbound.conf.d/privacy.conf
 server:
@@ -40,7 +31,6 @@ server:
     harden-dnssec-stripped: yes
     use-caps-for-id: yes
     prefetch: yes
-    rrset-roundrobin: yes
     auto-trust-anchor-file: "/var/lib/unbound/root.key"
 
 forward-zone:
@@ -53,31 +43,33 @@ EOF
 systemctl enable unbound
 systemctl restart unbound
 
-echo "nameserver 127.0.0.1" > /etc/resolv.conf
+sleep 3
 
 ########################################
-# 2️⃣ Configure Tor (Client Mode)
+# 2️⃣ Configure Tor Safely
 ########################################
 
-echo "=== Configuring Tor Client ==="
+echo "=== Configuring Tor ==="
 
-cat <<EOF > /etc/tor/torrc
+if ! grep -q "SocksPort 9050" /etc/tor/torrc 2>/dev/null; then
+cat <<EOF >> /etc/tor/torrc
+
+# Privacy Stack Settings
 SocksPort 9050
 ControlPort 9051
 CookieAuthentication 1
 AvoidDiskWrites 1
-AutomapHostsOnResolve 1
-DNSPort 9053
 SafeLogging 1
 EOF
+fi
 
 systemctl enable tor
 systemctl restart tor
 
-sleep 5
+sleep 8
 
 ########################################
-# 3️⃣ Firewall (Safe Mode)
+# 3️⃣ Configure Firewall (Safe Mode)
 ########################################
 
 echo "=== Configuring Firewall ==="
@@ -93,40 +85,44 @@ ufw --force enable
 ufw reload
 
 ########################################
-# 4️⃣ Prevent Common DNS Leaks
+# 4️⃣ Prevent Direct DNS Leaks
 ########################################
 
-echo "=== Preventing Direct DNS Leaks ==="
+echo "=== Applying DNS Leak Protection ==="
 
+iptables -C OUTPUT -p udp --dport 53 ! -d 127.0.0.1 -j REJECT 2>/dev/null || \
 iptables -A OUTPUT -p udp --dport 53 ! -d 127.0.0.1 -j REJECT
+
+iptables -C OUTPUT -p tcp --dport 53 ! -d 127.0.0.1 -j REJECT 2>/dev/null || \
 iptables -A OUTPUT -p tcp --dport 53 ! -d 127.0.0.1 -j REJECT
 
 netfilter-persistent save
 
 ########################################
-# 5️⃣ Optional IPv6 Disable (If Not Needed)
+# 5️⃣ Safe Testing Section
 ########################################
 
-if ! ip -6 addr show | grep -q "inet6"; then
-    echo "Disabling IPv6..."
-    echo "net.ipv6.conf.all.disable_ipv6 = 1" > /etc/sysctl.d/ipv6.conf
-    echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.d/ipv6.conf
-    sysctl --system
-fi
+echo ""
+echo "=== Service Status ==="
+systemctl is-active unbound
+systemctl is-active tor
 
-########################################
-# 6️⃣ Test Section (Non-blocking)
-########################################
-
-echo "=== Testing DNS ==="
+echo ""
+echo "=== Testing Local DNS ==="
 dig debian.org @127.0.0.1 +short
 
+echo ""
 echo "=== Testing Tor ==="
-torsocks curl -s https://check.torproject.org | grep -i congratulations
+torsocks curl -s https://check.torproject.org | grep -i tor
 
 echo ""
-echo "=== Privacy Stack Installed ==="
-echo "Use torsocks before commands for Tor routing:"
-echo "Example: torsocks curl https://ifconfig.me"
+echo "=== Normal Public IP ==="
+curl -s https://ifconfig.me
+
 echo ""
-echo "System remains stable and SSH accessible."
+echo "=== Tor Public IP ==="
+torsocks curl -s https://ifconfig.me
+
+echo ""
+echo "=== Finished Safely ==="
+echo "SSH remains accessible."
